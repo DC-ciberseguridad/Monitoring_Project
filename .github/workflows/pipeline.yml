@@ -1,0 +1,54 @@
+name: Deploy Monitoring Stack
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # 1. Terraform Init & Apply
+      # Esto crea la Tabla, el ECR vacío, la Lambda y el API Gateway
+      - name: Terraform Apply
+        working-directory: ./iac
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      # 2. Obtener el nombre del ECR desde los outputs de Terraform
+      - name: Get ECR Registry
+        id: vars
+        working-directory: ./iac
+        run: |
+          echo "ECR_REPO=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
+
+      # 3. Login, Build y Push de la Imagen de la API
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t ${{ env.ECR_REPO }}:latest ./api
+          docker push ${{ env.ECR_REPO }}:latest
+
+      # 4. ACTUALIZACIÓN CRÍTICA: Avisar a Lambda que hay nueva imagen
+      # Sin este paso, la Lambda seguirá ejecutando la versión vieja.
+      - name: Update Lambda Function
+        run: |
+          aws lambda update-function-code \
+            --function-name monitoring-event-processor \
+            --image-uri ${{ env.ECR_REPO }}:latest
