@@ -21,34 +21,33 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      # 1. Terraform Init & Apply
-      # Esto crea la Tabla, el ECR vacío, la Lambda y el API Gateway
-      - name: Terraform Apply
+      # --- FASE 1: Crear solo el ECR ---
+      - name: Terraform Init & ECR Target
         working-directory: ./iac
         run: |
           terraform init
-          terraform apply -auto-approve
+          terraform apply -target=aws_ecr_repository.monitoring_api -auto-approve
 
-      # 2. Obtener el nombre del ECR desde los outputs de Terraform
-      - name: Get ECR Registry
-        id: vars
-        working-directory: ./iac
-        run: |
-          echo "ECR_REPO=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
-
-      # 3. Login, Build y Push de la Imagen de la API
+      # --- FASE 2: Build & Push de la Imagen ---
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and Push Docker Image
         run: |
-          docker build -t ${{ env.ECR_REPO }}:latest ./api
-          docker push ${{ env.ECR_REPO }}:latest
+          # Obtenemos la URL del ECR que acabamos de asegurar que existe
+          ECR_REPO=$(aws ecr describe-repositories --repository-names monitoring-lambda-api --query 'repositories[0].repositoryUri' --output text)
+          docker build -t $ECR_REPO:latest ./api
+          docker push $ECR_REPO:latest
+          echo "ECR_REPO=$ECR_REPO" >> $GITHUB_ENV
 
-      # 4. ACTUALIZACIÓN CRÍTICA: Avisar a Lambda que hay nueva imagen
-      # Sin este paso, la Lambda seguirá ejecutando la versión vieja.
-      - name: Update Lambda Function
+      # --- FASE 3: Terraform Apply Completo ---
+      - name: Terraform Apply Full
+        working-directory: ./iac
+        run: terraform apply -auto-approve
+
+      # --- FASE 4: Refrescar Lambda (Opcional pero recomendado) ---
+      - name: Update Lambda Function Code
         run: |
           aws lambda update-function-code \
             --function-name monitoring-event-processor \
-            --image-uri ${{ env.ECR_REPO }}:latest
+            --image-uri ${{ env.ECR_REPO }}:latest || echo "Lambda no creada aún, saltando update manual."
